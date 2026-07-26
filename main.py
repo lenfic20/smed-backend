@@ -78,49 +78,17 @@ def _validate_url(url: str) -> str:
 
 def _pick_formats(info: dict) -> list[dict]:
     """
-    Extracts a clean, safe list of downloadable formats for the frontend.
+    Returns a clean set of standard resolution presets instead of raw stream IDs.
     """
-    raw_formats = info.get("formats", [])
-    if not raw_formats:
-        # Fallback for sites like TikTok/Instagram that return a single direct stream
-        return [{
-            "format_id": "best",
-            "label": "Best Quality",
-            "ext": info.get("ext", "mp4"),
-            "filesize": info.get("filesize") or info.get("filesize_approx"),
-        }]
-
-    formats = []
-    seen = set()
-
-    for f in raw_formats:
-        fid = f.get("format_id")
-        if not fid or fid in seen:
-            continue
-        
-        # Include video/audio formats or combined formats
-        ext = f.get("ext", "mp4")
-        note = f.get("format_note") or f.get("resolution") or ext
-        filesize = f.get("filesize") or f.get("filesize_approx")
-
-        formats.append({
-            "format_id": fid,
-            "label": f"{note} ({ext})",
-            "ext": ext,
-            "filesize": filesize,
-        })
-        seen.add(fid)
-
-    # Always ensure a 'Best' option exists as a safety net
-    if not any(f["format_id"] == "best" for f in formats):
-        formats.insert(0, {
-            "format_id": "best",
-            "label": "Best Available Quality",
-            "ext": "mp4",
-            "filesize": None,
-        })
-
-    return formats[:6] # Return top options
+    # Standard clean options for every video
+    options = [
+        {"format_id": "best", "label": "Best Available Quality", "ext": "mp4"},
+        {"format_id": "1080p", "label": "1080p Video", "ext": "mp4"},
+        {"format_id": "720p", "label": "720p Video", "ext": "mp4"},
+        {"format_id": "480p", "label": "480p Video", "ext": "mp4"},
+        {"format_id": "audio_only", "label": "Audio Only (MP3)", "ext": "mp3"},
+    ]
+    return options
 
 
 @app.post("/api/extract")
@@ -166,12 +134,17 @@ def download(
 
     outtmpl = str(job_dir / "%(title).80s.%(ext)s")
 
-    # If the selected format is video-only, automatically merge with best audio.
-    if format_id == "best":
+    # Map the clean UI choices to yt-dlp format selection strings
+    if format_id == "1080p":
+        fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+    elif format_id == "720p":
+        fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+    elif format_id == "480p":
+        fmt = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
+    elif format_id == "audio_only":
+        fmt = "bestaudio/best"
+    else:  # "best"
         fmt = "bestvideo+bestaudio/best"
-    else:
-        # Tries combined format first, then merges with audio if it's video-only, then falls back to best
-        fmt = f"{format_id}/{format_id}+bestaudio/best"
 
     ydl_opts = {
         "quiet": True,
@@ -179,27 +152,28 @@ def download(
         "noplaylist": True,
         "outtmpl": outtmpl,
         "format": fmt,
-        "merge_output_format": "mp4",
+        "merge_output_format": "mp3" if format_id == "audio_only" else "mp4",
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
+        downloaded_files = list(job_dir.glob("*"))
+        if not downloaded_files:
+            raise HTTPException(500, "Download finished but output file was not found")
+
+        target = downloaded_files[0]
+        ext = target.suffix.lstrip(".")
+        media_type = "audio/mpeg" if ext == "mp3" else f"video/{ext}"
+
+        return FileResponse(
+            path=target,
+            media_type=media_type,
+            filename=target.name,
+            headers={"Content-Disposition": f'attachment; filename="{target.name}"'}
+        )
+
     except yt_dlp.utils.DownloadError as e:
         shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(422, f"Download failed: {e}")
-
-    files = list(job_dir.glob("*"))
-
-    if not files:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(500, "No file was produced.")
-
-    file_path = files[0]
-
-    return FileResponse(
-        path=file_path,
-        filename=file_path.name,
-        media_type="application/octet-stream",
-    )
+        raise HTTPException(422, f"yt-dlp failed to fetch media: {str(e)}")
