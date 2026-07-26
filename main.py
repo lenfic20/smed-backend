@@ -76,87 +76,51 @@ def _validate_url(url: str) -> str:
     return url
 
 
-def _pick_formats(info):
+def _pick_formats(info: dict) -> list[dict]:
     """
-    Returns a clean list of downloadable formats that works well with
-    YouTube, TikTok, Instagram, and X (Twitter).
+    Extracts a clean, safe list of downloadable formats for the frontend.
     """
+    raw_formats = info.get("formats", [])
+    if not raw_formats:
+        # Fallback for sites like TikTok/Instagram that return a single direct stream
+        return [{
+            "format_id": "best",
+            "label": "Best Quality",
+            "ext": info.get("ext", "mp4"),
+            "filesize": info.get("filesize") or info.get("filesize_approx"),
+        }]
 
-    formats = info.get("formats", [])
-    picked = []
+    formats = []
     seen = set()
 
-    for f in formats:
-        ext = f.get("ext")
-
-        # Skip formats without an extension
-        if not ext:
+    for f in raw_formats:
+        fid = f.get("format_id")
+        if not fid or fid in seen:
             continue
+        
+        # Include video/audio formats or combined formats
+        ext = f.get("ext", "mp4")
+        note = f.get("format_note") or f.get("resolution") or ext
+        filesize = f.get("filesize") or f.get("filesize_approx")
 
-        vcodec = f.get("vcodec")
-        acodec = f.get("acodec")
+        formats.append({
+            "format_id": fid,
+            "label": f"{note} ({ext})",
+            "ext": ext,
+            "filesize": filesize,
+        })
+        seen.add(fid)
 
-        has_video = vcodec not in (None, "none")
-        has_audio = acodec not in (None, "none")
+    # Always ensure a 'Best' option exists as a safety net
+    if not any(f["format_id"] == "best" for f in formats):
+        formats.insert(0, {
+            "format_id": "best",
+            "label": "Best Available Quality",
+            "ext": "mp4",
+            "filesize": None,
+        })
 
-        # ---------- VIDEO ----------
-        if has_video:
-            height = f.get("height") or 0
-
-            label = (
-                f"{height}p"
-                if height
-                else f.get("format_note")
-                or f.get("resolution")
-                or "Video"
-            )
-
-            key = ("video", label, ext)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            picked.append({
-                "id": f["format_id"],
-                "type": "video",
-                "label": label,
-                "ext": ext,
-                "filesize": f.get("filesize") or f.get("filesize_approx"),
-                "video_only": not has_audio,
-            })
-
-        # ---------- AUDIO ----------
-        elif has_audio:
-            abr = f.get("abr")
-
-            label = (
-                f"{int(abr)} kbps"
-                if abr
-                else "Audio"
-            )
-
-            key = ("audio", label, ext)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            picked.append({
-                "id": f["format_id"],
-                "type": "audio",
-                "label": label,
-                "ext": ext,
-                "filesize": f.get("filesize") or f.get("filesize_approx"),
-            })
-
-    # Highest quality first
-    picked.sort(
-        key=lambda x: (
-            x["type"] != "video",
-            -(int(x["label"].replace("p", "")) if x["type"] == "video" and x["label"].endswith("p") else 0),
-        )
-    )
-
-    return picked
+    return formats[:6] # Return top options
 
 
 @app.post("/api/extract")
@@ -206,7 +170,8 @@ def download(
     if format_id == "best":
         fmt = "bestvideo+bestaudio/best"
     else:
-        fmt = f"{format_id}+bestaudio/{format_id}"
+        # Tries combined format first, then merges with audio if it's video-only, then falls back to best
+        fmt = f"{format_id}/{format_id}+bestaudio/best"
 
     ydl_opts = {
         "quiet": True,
