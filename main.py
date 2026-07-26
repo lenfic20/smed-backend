@@ -76,55 +76,87 @@ def _validate_url(url: str) -> str:
     return url
 
 
-def _pick_formats(info: dict) -> list[dict]:
-    """Collapse yt-dlp's raw format list into a small, user-facing menu."""
-    formats = info.get("formats") or []
-    out = []
+def _pick_formats(info):
+    """
+    Returns a clean list of downloadable formats that works well with
+    YouTube, TikTok, Instagram, and X (Twitter).
+    """
 
-    # Progressive (video+audio in one file) formats first — simplest for users.
-    seen_labels = set()
+    formats = info.get("formats", [])
+    picked = []
+    seen = set()
+
     for f in formats:
-        if f.get("vcodec") not in (None, "none") and f.get("acodec") not in (None, "none"):
-            height = f.get("height")
-            label = f"{height}p" if height else f.get("format_note", f.get("format_id"))
-            if label in seen_labels:
+        ext = f.get("ext")
+
+        # Skip formats without an extension
+        if not ext:
+            continue
+
+        vcodec = f.get("vcodec")
+        acodec = f.get("acodec")
+
+        has_video = vcodec not in (None, "none")
+        has_audio = acodec not in (None, "none")
+
+        # ---------- VIDEO ----------
+        if has_video:
+            height = f.get("height") or 0
+
+            label = (
+                f"{height}p"
+                if height
+                else f.get("format_note")
+                or f.get("resolution")
+                or "Video"
+            )
+
+            key = ("video", label, ext)
+            if key in seen:
                 continue
-            seen_labels.add(label)
-            out.append({
-                "format_id": f["format_id"],
-                "label": f"Video · {label} · {f.get('ext')}",
-                "ext": f.get("ext"),
+            seen.add(key)
+
+            picked.append({
+                "id": f["format_id"],
+                "type": "video",
+                "label": label,
+                "ext": ext,
                 "filesize": f.get("filesize") or f.get("filesize_approx"),
-                "kind": "video",
+                "video_only": not has_audio,
             })
 
-    # Best audio-only option, useful for "just the audio" downloads.
-    audio_only = [
-        f for f in formats
-        if f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none")
-    ]
-    if audio_only:
-        best_audio = max(audio_only, key=lambda f: f.get("abr") or 0)
-        out.append({
-            "format_id": best_audio["format_id"],
-            "label": f"Audio only · {best_audio.get('ext')}",
-            "ext": best_audio.get("ext"),
-            "filesize": best_audio.get("filesize") or best_audio.get("filesize_approx"),
-            "kind": "audio",
-        })
+        # ---------- AUDIO ----------
+        elif has_audio:
+            abr = f.get("abr")
 
-    # If yt-dlp didn't report per-format details (some Instagram/TikTok
-    # posts), fall back to a single "best" option.
-    if not out:
-        out.append({
-            "format_id": "best",
-            "label": "Best available",
-            "ext": info.get("ext", "mp4"),
-            "filesize": None,
-            "kind": "video",
-        })
+            label = (
+                f"{int(abr)} kbps"
+                if abr
+                else "Audio"
+            )
 
-    return out
+            key = ("audio", label, ext)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            picked.append({
+                "id": f["format_id"],
+                "type": "audio",
+                "label": label,
+                "ext": ext,
+                "filesize": f.get("filesize") or f.get("filesize_approx"),
+            })
+
+    # Highest quality first
+    picked.sort(
+        key=lambda x: (
+            x["type"] != "video",
+            -(int(x["label"].replace("p", "")) if x["type"] == "video" and x["label"].endswith("p") else 0),
+        )
+    )
+
+    return picked
 
 
 @app.post("/api/extract")
@@ -163,39 +195,46 @@ def download(
     format_id: str = Query("best"),
 ):
     url = _validate_url(url)
+
     job_id = uuid.uuid4().hex
     job_dir = TMP_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     outtmpl = str(job_dir / "%(title).80s.%(ext)s")
+
+    # If the selected format is video-only, automatically merge with best audio.
+    if format_id == "best":
+        fmt = "bestvideo+bestaudio/best"
+    else:
+        fmt = f"{format_id}+bestaudio/{format_id}"
+
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "outtmpl": outtmpl,
-        "format": format_id if format_id != "best" else "best",
+        "format": fmt,
+        "merge_output_format": "mp4",
     }
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
+
     except yt_dlp.utils.DownloadError as e:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise HTTPException(422, f"Download failed: {e}")
 
     files = list(job_dir.glob("*"))
+
     if not files:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise HTTPException(500, "No file was produced.")
 
     file_path = files[0]
+
     return FileResponse(
         path=file_path,
         filename=file_path.name,
         media_type="application/octet-stream",
-        background=None,  # left simple for prototype; see README re: cleanup
     )
-
-
-@app.get("/api/health")
-def health():
-    return {"status": "ok"}
