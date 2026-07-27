@@ -8,6 +8,7 @@ import tempfile
 import shutil
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -90,6 +91,13 @@ def _cleanup_dir(path: Path):
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _safe_ascii_name(stem: str, fallback: str = "video") -> str:
+    """Strip to a pure-ASCII, header-safe filename stem."""
+    ascii_only = stem.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r'[^\w\-. ]', '', ascii_only).strip()
+    return cleaned or fallback
+
+
 @app.post("/api/extract")
 def extract(req: ExtractRequest):
     url = _validate_url(req.url)
@@ -129,7 +137,10 @@ def download(
     job_dir = TMP_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    outtmpl = str(job_dir / "%(title).80s.%(ext)s")
+    # Use the job_id (pure ASCII/hex) as the on-disk filename instead of the
+    # video title. Titles can contain emoji / non-Latin-1 characters, which
+    # previously broke HTTP header encoding downstream.
+    outtmpl = str(job_dir / f"{job_id}.%(ext)s")
 
     # Select single-stream formats to avoid FFmpeg dependency
     if format_id == "bestaudio":
@@ -147,7 +158,10 @@ def download(
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            info = ydl.extract_info(url, download=True)
+
+        if info.get("_type") == "playlist" and info.get("entries"):
+            info = info["entries"][0]
 
         downloaded_files = list(job_dir.glob("*"))
         if not downloaded_files:
@@ -157,16 +171,32 @@ def download(
         ext = target.suffix.lstrip(".")
         media_type = "audio/mp4" if ext in ["m4a", "aac"] else f"video/{ext}"
 
+        # Build a header-safe filename for the download prompt.
+        # ASCII fallback (for old clients) + UTF-8 encoded version (for
+        # modern browsers) via RFC 5987, so real titles with emoji/non-Latin
+        # characters can still show up without breaking header encoding.
+        original_title = info.get("title") or target.stem
+        safe_ascii = _safe_ascii_name(original_title)
+        ascii_filename = f"{safe_ascii}.{ext}"
+        utf8_filename = quote(f"{original_title}.{ext}")
+
         # Schedule temp folder deletion after response is sent
         background_tasks.add_task(_cleanup_dir, job_dir)
 
         return FileResponse(
             path=target,
             media_type=media_type,
-            filename=target.name,
-            headers={"Content-Disposition": f'attachment; filename="{target.name}"'}
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_filename}"; '
+                    f"filename*=UTF-8''{utf8_filename}"
+                )
+            },
         )
 
+    except HTTPException:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise
     except Exception as e:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise HTTPException(422, f"Failed to fetch media: {str(e)}")
