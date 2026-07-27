@@ -5,16 +5,7 @@ Wraps yt-dlp to (1) inspect a social media URL and list downloadable
 formats, and (2) fetch a chosen format and stream it back to the client.
 
 Supported out of the box (via yt-dlp extractors): YouTube, TikTok,
-Instagram, X/Twitter. Anything else yt-dlp supports will generally also
-work, but is unverified here.
-
-IMPORTANT — read before deploying:
-  - Respect each platform's Terms of Service. Most platforms prohibit
-    third-party downloading of content you don't own or have rights to.
-  - Do not use this to redistribute copyrighted material.
-  - Private/login-gated content is out of scope for this prototype (no
-    cookie/auth handling is wired up).
-  - Platforms change frequently; keep yt-dlp updated (`pip install -U yt-dlp`).
+Instagram, X/Twitter.
 """
 
 import os
@@ -33,8 +24,7 @@ import yt_dlp
 
 app = FastAPI(title="smed API")
 
-# Allow the local static frontend (or any origin, for prototype purposes)
-# to call this API. Tighten this before deploying publicly.
+# Allow CORS for static frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -51,10 +41,25 @@ ALLOWED_HOST_PATTERNS = [
     r"(?:^|\.)twitter\.com$",
 ]
 
-# Jobs live for the duration of the process in this prototype. Swap for
-# redis/a DB if you need this to survive restarts or run multi-worker.
 TMP_ROOT = Path(tempfile.gettempdir()) / "smed_jobs"
 TMP_ROOT.mkdir(exist_ok=True)
+
+# Common yt-dlp options to bypass YouTube bot/IP blocks on cloud servers (Render)
+YDL_COMMON_OPTS = {
+    "quiet": True,
+    "no_warnings": True,
+    "noplaylist": True,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "ios", "web"],
+        }
+    },
+    "http_headers": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    },
+}
 
 
 class ExtractRequest(BaseModel):
@@ -80,7 +85,6 @@ def _pick_formats(info: dict) -> list[dict]:
     """
     Returns a clean set of standard resolution presets instead of raw stream IDs.
     """
-    # Standard clean options for every video
     options = [
         {"format_id": "best", "label": "Best Available Quality", "ext": "mp4"},
         {"format_id": "1080p", "label": "1080p Video", "ext": "mp4"},
@@ -96,10 +100,8 @@ def extract(req: ExtractRequest):
     url = _validate_url(req.url)
 
     ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
+        **YDL_COMMON_OPTS,
         "skip_download": True,
-        "noplaylist": True,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -107,7 +109,6 @@ def extract(req: ExtractRequest):
     except yt_dlp.utils.DownloadError as e:
         raise HTTPException(422, f"Couldn't read that link: {e}")
 
-    # Some Instagram/TikTok links resolve to a "playlist" of one entry.
     if info.get("_type") == "playlist" and info.get("entries"):
         info = info["entries"][0]
 
@@ -134,7 +135,7 @@ def download(
 
     outtmpl = str(job_dir / "%(title).80s.%(ext)s")
 
-    # Map the clean UI choices to yt-dlp format selection strings
+    # Map clean UI choices to yt-dlp format rules
     if format_id == "1080p":
         fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
     elif format_id == "720p":
@@ -147,9 +148,7 @@ def download(
         fmt = "bestvideo+bestaudio/best"
 
     ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
+        **YDL_COMMON_OPTS,
         "outtmpl": outtmpl,
         "format": fmt,
         "merge_output_format": "mp3" if format_id == "audio_only" else "mp4",
