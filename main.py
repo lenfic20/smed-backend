@@ -15,10 +15,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import yt_dlp
-import static_ffmpeg
-
-# Automatically downloads and sets up ffmpeg binary on server startup
-static_ffmpeg.add_paths()
 
 app = FastAPI(title="smed API")
 
@@ -42,7 +38,7 @@ ALLOWED_HOST_PATTERNS = [
 TMP_ROOT = Path(tempfile.gettempdir()) / "smed_jobs"
 TMP_ROOT.mkdir(exist_ok=True)
 
-# Common yt-dlp options to bypass YouTube bot/IP blocks on cloud servers (Render)
+# Common yt-dlp options to bypass YouTube bot/IP blocks on cloud servers
 YDL_COMMON_OPTS = {
     "quiet": True,
     "no_warnings": True,
