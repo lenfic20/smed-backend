@@ -8,7 +8,6 @@ import tempfile
 import shutil
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,7 +37,7 @@ ALLOWED_HOST_PATTERNS = [
 TMP_ROOT = Path(tempfile.gettempdir()) / "smed_jobs"
 TMP_ROOT.mkdir(exist_ok=True)
 
-# Common yt-dlp options to bypass YouTube bot/IP blocks on cloud servers
+# Common yt-dlp options to bypass YouTube bot/IP blocks on cloud servers (Render)
 YDL_COMMON_OPTS = {
     "quiet": True,
     "no_warnings": True,
@@ -77,14 +76,12 @@ def _validate_url(url: str) -> str:
 
 def _pick_formats(info: dict) -> list[dict]:
     """
-    Returns clean standard resolution presets.
+    Returns clean, reliable format selections that work across all platforms.
     """
     return [
-        {"format_id": "best", "label": "Best Available Quality", "ext": "mp4"},
-        {"format_id": "1080p", "label": "1080p Video", "ext": "mp4"},
-        {"format_id": "720p", "label": "720p Video", "ext": "mp4"},
-        {"format_id": "480p", "label": "480p Video", "ext": "mp4"},
-        {"format_id": "audio_only", "label": "Audio Only (MP3)", "ext": "mp3"},
+        {"format_id": "best", "label": "Best Quality Video", "ext": "mp4"},
+        {"format_id": "worst", "label": "Fast Download (Low Quality)", "ext": "mp4"},
+        {"format_id": "bestaudio", "label": "Audio Only", "ext": "m4a"},
     ]
 
 
@@ -134,32 +131,19 @@ def download(
 
     outtmpl = str(job_dir / "%(title).80s.%(ext)s")
 
-    # Map UI choices to format strings
-    if format_id == "1080p":
-        fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-    elif format_id == "720p":
-        fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-    elif format_id == "480p":
-        fmt = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
-    elif format_id == "audio_only":
+    # Select single-stream formats to avoid FFmpeg dependency
+    if format_id == "bestaudio":
         fmt = "bestaudio/best"
-    else:  # "best"
-        fmt = "bestvideo+bestaudio/best"
+    elif format_id == "worst":
+        fmt = "worst/worstvideo"
+    else:
+        fmt = "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio/best"
 
     ydl_opts = {
         **YDL_COMMON_OPTS,
         "outtmpl": outtmpl,
         "format": fmt,
     }
-
-    if format_id == "audio_only":
-        ydl_opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }]
-    else:
-        ydl_opts["merge_output_format"] = "mp4"
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -171,7 +155,7 @@ def download(
 
         target = downloaded_files[0]
         ext = target.suffix.lstrip(".")
-        media_type = "audio/mpeg" if ext == "mp3" else f"video/{ext}"
+        media_type = "audio/mp4" if ext in ["m4a", "aac"] else f"video/{ext}"
 
         # Schedule temp folder deletion after response is sent
         background_tasks.add_task(_cleanup_dir, job_dir)
