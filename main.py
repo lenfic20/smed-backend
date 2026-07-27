@@ -15,6 +15,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import yt_dlp
+import static_ffmpeg
+
+# Automatically downloads and sets up ffmpeg binary on server startup
+static_ffmpeg.add_paths()
 
 app = FastAPI(title="smed API")
 
