@@ -80,8 +80,9 @@ def _pick_formats(info: dict) -> list[dict]:
     Returns clean, reliable format selections that work across all platforms.
     """
     return [
-        {"format_id": "best", "label": "Best Quality Video", "ext": "mp4"},
-        {"format_id": "worst", "label": "Fast Download (Low Quality)", "ext": "mp4"},
+        {"format_id": "best", "label": "Best Available Quality", "ext": "mp4"},
+        {"format_id": "720p", "label": "720p", "ext": "mp4"},
+        {"format_id": "480p", "label": "480p", "ext": "mp4"},
         {"format_id": "bestaudio", "label": "Audio Only", "ext": "m4a"},
     ]
 
@@ -142,13 +143,18 @@ def download(
     # previously broke HTTP header encoding downstream.
     outtmpl = str(job_dir / f"{job_id}.%(ext)s")
 
-    # Select single-stream formats to avoid FFmpeg dependency
+    # Select single-stream (pre-muxed) formats to avoid needing an FFmpeg
+    # merge step. Each option below picks the best combined video+audio
+    # format at or under the target resolution, falling back to any
+    # available format if nothing matches exactly.
     if format_id == "bestaudio":
         fmt = "bestaudio/best"
-    elif format_id == "worst":
-        fmt = "worst/worstvideo"
-    else:
-        fmt = "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio/best"
+    elif format_id == "720p":
+        fmt = "best[height<=720][ext=mp4]/best[height<=720]/best"
+    elif format_id == "480p":
+        fmt = "best[height<=480][ext=mp4]/best[height<=480]/best"
+    else:  # "best"
+        fmt = "best[ext=mp4]/best"
 
     ydl_opts = {
         **YDL_COMMON_OPTS,
