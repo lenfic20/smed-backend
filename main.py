@@ -1,11 +1,5 @@
 """
 smed backend — link-paste media extractor.
-
-Wraps yt-dlp to (1) inspect a social media URL and list downloadable
-formats, and (2) fetch a chosen format and stream it back to the client.
-
-Supported out of the box (via yt-dlp extractors): YouTube, TikTok,
-Instagram, X/Twitter.
 """
 
 import os
@@ -16,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -83,16 +77,20 @@ def _validate_url(url: str) -> str:
 
 def _pick_formats(info: dict) -> list[dict]:
     """
-    Returns a clean set of standard resolution presets instead of raw stream IDs.
+    Returns clean standard resolution presets.
     """
-    options = [
+    return [
         {"format_id": "best", "label": "Best Available Quality", "ext": "mp4"},
         {"format_id": "1080p", "label": "1080p Video", "ext": "mp4"},
         {"format_id": "720p", "label": "720p Video", "ext": "mp4"},
         {"format_id": "480p", "label": "480p Video", "ext": "mp4"},
         {"format_id": "audio_only", "label": "Audio Only (MP3)", "ext": "mp3"},
     ]
-    return options
+
+
+def _cleanup_dir(path: Path):
+    """Background task to remove temp files after response delivery."""
+    shutil.rmtree(path, ignore_errors=True)
 
 
 @app.post("/api/extract")
@@ -124,6 +122,7 @@ def extract(req: ExtractRequest):
 
 @app.get("/api/download")
 def download(
+    background_tasks: BackgroundTasks,
     url: str = Query(...),
     format_id: str = Query("best"),
 ):
@@ -135,7 +134,7 @@ def download(
 
     outtmpl = str(job_dir / "%(title).80s.%(ext)s")
 
-    # Map clean UI choices to yt-dlp format rules
+    # Map UI choices to format strings
     if format_id == "1080p":
         fmt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
     elif format_id == "720p":
@@ -151,8 +150,16 @@ def download(
         **YDL_COMMON_OPTS,
         "outtmpl": outtmpl,
         "format": fmt,
-        "merge_output_format": "mp3" if format_id == "audio_only" else "mp4",
     }
+
+    if format_id == "audio_only":
+        ydl_opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }]
+    else:
+        ydl_opts["merge_output_format"] = "mp4"
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -166,6 +173,9 @@ def download(
         ext = target.suffix.lstrip(".")
         media_type = "audio/mpeg" if ext == "mp3" else f"video/{ext}"
 
+        # Schedule temp folder deletion after response is sent
+        background_tasks.add_task(_cleanup_dir, job_dir)
+
         return FileResponse(
             path=target,
             media_type=media_type,
@@ -173,6 +183,6 @@ def download(
             headers={"Content-Disposition": f'attachment; filename="{target.name}"'}
         )
 
-    except yt_dlp.utils.DownloadError as e:
+    except Exception as e:
         shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(422, f"yt-dlp failed to fetch media: {str(e)}")
+        raise HTTPException(422, f"Failed to fetch media: {str(e)}")
